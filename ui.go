@@ -14,18 +14,30 @@ import (
 //go:embed ui.html
 var uiHTML string
 
+// Big Shoulders Display (latin subset), SIL Open Font License 1.1.
+//
+//go:embed display.woff2
+var displayFont []byte
+
 var page = template.Must(template.New("ui").Parse(uiHTML))
 
 type row struct {
-	I int
+	I    int
+	N    string // "01", "02", ...
+	Host string
 	conn
-	Status string
-	Failed bool
+	State  string // "start", "sight" or "lost"
+	Detail string
 }
 
 func (m *manager) handler(password string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) { m.render(w, nil) })
+	mux.HandleFunc("GET /display.woff2", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "font/woff2")
+		w.Header().Set("Cache-Control", "max-age=86400")
+		w.Write(displayFont)
+	})
 	mux.HandleFunc("POST /save", func(w http.ResponseWriter, r *http.Request) {
 		c := conn{}
 		for name, dst := range map[string]*string{"target": &c.Target, "dsn": &c.DSN, "interval": &c.Interval, "filter": &c.Filter} {
@@ -106,12 +118,13 @@ func (m *manager) render(w http.ResponseWriter, problem error) {
 	rows := make([]row, len(m.runners))
 	for i, r := range m.runners {
 		r.mu.Lock()
-		rows[i] = row{I: i, conn: r.conn, Status: "starting"}
+		rows[i] = row{I: i, N: fmt.Sprintf("%02d", i+1), Host: r.sc.instance, conn: r.conn, State: "start"}
 		switch {
 		case r.lastErr != "":
-			rows[i].Status, rows[i].Failed = r.lastErr, true
+			rows[i].State, rows[i].Detail = "lost", r.lastErr
 		case !r.last.IsZero():
-			rows[i].Status = fmt.Sprintf("ok, %d metrics shipped, last at %s", r.shipped, r.last.Format("15:04:05"))
+			rows[i].State = "sight"
+			rows[i].Detail = fmt.Sprintf("%d metrics shipped · last scrape %s", r.shipped, r.last.Format("15:04:05"))
 		}
 		r.mu.Unlock()
 	}

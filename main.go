@@ -358,11 +358,13 @@ type runner struct {
 	sc       *scraper
 	interval time.Duration
 	cancel   context.CancelFunc
+	label    string // target with any password redacted, for /metrics
 
-	mu      sync.Mutex
-	last    time.Time
-	lastErr string
-	shipped int
+	mu                sync.Mutex
+	last              time.Time
+	lastErr           string
+	shipped           int
+	scrapes, failures int
 }
 
 // build makes a runner for c; shared holds the hosts used by more than one target.
@@ -380,7 +382,7 @@ func (c conn) build(shared map[string]bool) (*runner, error) {
 	if shared[u.Host] {
 		instance += u.Path
 	}
-	r := &runner{conn: c, sn: sn, sc: &scraper{url: c.Target, instance: instance}, interval: time.Minute}
+	r := &runner{conn: c, sn: sn, sc: &scraper{url: c.Target, instance: instance}, interval: time.Minute, label: u.Redacted()}
 	if c.Interval != "" {
 		if r.interval, err = time.ParseDuration(c.Interval); err != nil || r.interval < time.Second {
 			return nil, fmt.Errorf("interval %q: want a duration of at least 1s, like 30s", c.Interval)
@@ -408,7 +410,9 @@ func (r *runner) run(ctx context.Context) {
 		}
 		r.mu.Lock()
 		r.last, r.lastErr = time.Now(), ""
+		r.scrapes++
 		if err != nil {
+			r.failures++
 			r.lastErr = err.Error()
 			log.Printf("%s: %v", r.sc.instance, err)
 		} else {
@@ -502,6 +506,43 @@ func (m *manager) conns() []conn {
 	return out
 }
 
+// metrics serves firewatch's own health in the Prometheus text format.
+func (m *manager) metrics(w http.ResponseWriter, _ *http.Request) {
+	type sample struct {
+		conn, target                     string
+		scrapes, failures, shipped, last float64
+	}
+	m.mu.Lock()
+	samples := make([]sample, len(m.runners))
+	for i, r := range m.runners {
+		r.mu.Lock()
+		samples[i] = sample{fmt.Sprintf("%02d", i+1), r.label, float64(r.scrapes), float64(r.failures), float64(r.shipped), 0}
+		if !r.last.IsZero() {
+			samples[i].last = float64(r.last.UnixMilli()) / 1000
+		}
+		r.mu.Unlock()
+	}
+	m.mu.Unlock()
+
+	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprintf(w, "# HELP firewatch_connections Configured connections.\n# TYPE firewatch_connections gauge\nfirewatch_connections %d\n", len(samples))
+	for _, f := range []struct {
+		name, typ, help string
+		val             func(sample) float64
+	}{
+		{"firewatch_scrapes_total", "counter", "Scrape-and-ship cycles run.", func(s sample) float64 { return s.scrapes }},
+		{"firewatch_scrape_failures_total", "counter", "Cycles where the scrape or the send to Sentry failed.", func(s sample) float64 { return s.failures }},
+		{"firewatch_metrics_shipped_total", "counter", "Metric samples accepted by Sentry.", func(s sample) float64 { return s.shipped }},
+		{"firewatch_last_scrape_timestamp_seconds", "gauge", "Unix time of the last cycle, 0 before the first.", func(s sample) float64 { return s.last }},
+	} {
+		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", f.name, f.help, f.name, f.typ)
+		for _, s := range samples {
+			fmt.Fprintf(w, "%s{connection=\"%s\",target=\"%s\"} %s\n", f.name, s.conn, esc.Replace(s.target), strconv.FormatFloat(f.val(s), 'g', -1, 64))
+		}
+	}
+}
+
 // needsPassword reports whether a UI on listen is reachable from other hosts.
 // The UI can read DSNs and make this host fetch URLs: never expose it open.
 func needsPassword(listen string) bool {
@@ -531,6 +572,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	m := &manager{ctx: ctx, path: path}
+	if addr := os.Getenv("METRICS_LISTEN"); addr != "" {
+		// bind before the runners start, so a self-scrape doesn't fail on startup
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /metrics", m.metrics)
+		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go func() { log.Fatal(srv.Serve(ln)) }()
+		log.Printf("prometheus metrics on %s/metrics", addr)
+	}
 	if err := m.apply(conns, false); err != nil {
 		log.Fatal(err)
 	}
