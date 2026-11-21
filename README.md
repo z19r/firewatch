@@ -61,7 +61,8 @@ The file is read at startup. It holds DSNs, so keep it private.
 Set `LISTEN` to turn on a small page that lists the connections with their
 last scrape status and lets you add, edit and delete them. Changes take effect
 immediately and are written back to the YAML file (comments in the file are
-not preserved).
+not preserved). If the list changed since you loaded the page, an edit is
+refused and the page shows the current list.
 
 ```sh
 docker run --rm -p 8080:8080 -v firewatch:/data \
@@ -110,19 +111,21 @@ Sentry has counters, gauges and distributions. Prometheus series map like this:
 | (synthetic) `up` | gauge, `1` if the scrape worked, `0` if not                                      |
 
 - Labels become attributes. Every metric also gets `instance` (the target's
-  `host:port`).
+  `host:port`, plus the path when two targets share a `host:port`).
 - Names ending in `_seconds` or `_bytes` (optionally `_total`) get the unit
   `second` or `byte`.
 - The first scrape of a target only records a baseline for cumulative series,
   so a restart never replays a counter's lifetime total. A counter that goes
-  backwards is treated as reset.
+  backwards is treated as reset. A series missing from up to 5 scrapes in a
+  row is still sent as a delta when it comes back.
 - Counters that did not change are not sent. `NaN` and `±Inf` samples are
   skipped.
 
 ## Limits
 
-- A batch Sentry rejects (outage, rate limit) is logged and dropped, not
-  retried.
+- A batch Sentry rejects (outage) is logged and dropped, not retried; the
+  other batches of that scrape are still sent. On a rate limit (429) the rest
+  of that scrape is dropped.
 - Targets are scraped with a plain GET: no auth headers, no custom TLS, no
   service discovery.
 - Native histograms and Sentry distributions are not used: an already

@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -22,7 +23,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,16 +83,24 @@ func newSentry(dsn string) (*sentry, error) {
 
 const batchSize = 1000
 
+// send posts items in batches. A rejected batch does not stop the others,
+// except on 429, where every further batch would be rejected too.
 func (s *sentry) send(ctx context.Context, items []item) error {
+	var errs []error
 	for len(items) > 0 {
 		n := min(len(items), batchSize)
 		if err := s.post(ctx, items[:n]); err != nil {
-			return err
+			errs = append(errs, err)
+			if errors.Is(err, errRateLimited) || ctx.Err() != nil {
+				break
+			}
 		}
 		items = items[n:]
 	}
-	return nil
+	return errors.Join(errs...)
 }
+
+var errRateLimited = errors.New("rate limited")
 
 func (s *sentry) post(ctx context.Context, items []item) error {
 	for i := range items {
@@ -121,6 +130,9 @@ func (s *sentry) post(ctx context.Context, items []item) error {
 	defer resp.Body.Close()
 	// shortcut: a failed or rate-limited (429) batch is dropped, not retried;
 	// add a retry queue if gaps during Sentry outages start to matter.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return fmt.Errorf("sentry: %w", errRateLimited)
+	}
 	if resp.StatusCode/100 != 2 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("sentry: %s: %s", resp.Status, bytes.TrimSpace(msg))
@@ -133,9 +145,18 @@ func (s *sentry) post(ctx context.Context, items []item) error {
 type scraper struct {
 	url, instance string
 	filter        *regexp.Regexp
-	prev          map[string]float64 // last cumulative value per series
-	primed        bool               // a scrape has succeeded, so prev is a baseline
+	prev          map[string]last // last cumulative value per series
+	primed        bool            // a scrape has succeeded, so prev is a baseline
 }
+
+type last struct {
+	v      float64
+	missed int // scrapes in a row this series was absent
+}
+
+// keepMissing is how many scrapes a vanished series is remembered, so one that
+// comes back is sent as a delta rather than as its lifetime total.
+const keepMissing = 5
 
 func (s *scraper) scrape(ctx context.Context) ([]item, error) {
 	ts := float64(time.Now().UnixMilli()) / 1e3
@@ -174,7 +195,7 @@ func (s *scraper) fetch(ctx context.Context) (map[string]*dto.MetricFamily, erro
 // sent as the delta since the previous scrape.
 func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item {
 	var out []item
-	next := make(map[string]float64)
+	next := make(map[string]last)
 
 	emit := func(name, typ, unit string, v float64, attrs map[string]attr) {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
@@ -184,8 +205,9 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 	}
 	count := func(name, unit string, cur float64, attrs map[string]attr) {
 		key := seriesKey(name, attrs)
-		next[key] = cur
-		old, seen := s.prev[key]
+		next[key] = last{v: cur}
+		p, seen := s.prev[key]
+		old := p.v
 		switch {
 		case !seen && !s.primed:
 			return // first scrape of this target: baseline only
@@ -197,10 +219,7 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 		}
 	}
 	with := func(base map[string]attr, k, v string) map[string]attr {
-		m := make(map[string]attr, len(base)+2)
-		for bk, bv := range base {
-			m[bk] = bv
-		}
+		m := maps.Clone(base)
 		m[k] = attr{v, "string"}
 		return m
 	}
@@ -216,7 +235,7 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 				base[l.GetName()] = attr{l.GetValue(), "string"}
 			}
 			// each emitted item needs its own map: send() adds a sequence attribute
-			own := func() map[string]attr { return with(base, "instance", base["instance"].Value.(string)) }
+			own := func() map[string]attr { return maps.Clone(base) }
 
 			switch fam.GetType() {
 			case dto.MetricType_COUNTER:
@@ -244,19 +263,19 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 			}
 		}
 	}
+	for k, p := range s.prev {
+		if _, ok := next[k]; !ok && p.missed < keepMissing {
+			next[k] = last{p.v, p.missed + 1}
+		}
+	}
 	s.prev, s.primed = next, true
 	return out
 }
 
 func seriesKey(name string, attrs map[string]attr) string {
-	keys := make([]string, 0, len(attrs))
-	for k := range attrs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
 	var b strings.Builder
 	b.WriteString(name)
-	for _, k := range keys {
+	for _, k := range slices.Sorted(maps.Keys(attrs)) {
 		fmt.Fprintf(&b, "\xff%s\xff%v", k, attrs[k].Value)
 	}
 	return b.String()
@@ -321,6 +340,10 @@ func saveConfig(path string, conns []conn) error {
 		f.Close()
 		return err
 	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
 	if err := f.Close(); err != nil {
 		return err
 	}
@@ -344,7 +367,8 @@ type runner struct {
 	scrapes, failures int
 }
 
-func (c conn) build() (*runner, error) {
+// build makes a runner for c; shared holds the hosts used by more than one target.
+func (c conn) build(shared map[string]bool) (*runner, error) {
 	u, err := url.Parse(c.Target)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("target %q is not a URL like http://host:9100/metrics", c.Target)
@@ -353,7 +377,12 @@ func (c conn) build() (*runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dsn: %w", err)
 	}
-	r := &runner{conn: c, sn: sn, sc: &scraper{url: c.Target, instance: u.Host}, interval: time.Minute, label: u.Redacted()}
+	// two endpoints on one host:port must not share an instance label
+	instance := u.Host
+	if shared[u.Host] {
+		instance += u.Path
+	}
+	r := &runner{conn: c, sn: sn, sc: &scraper{url: c.Target, instance: instance}, interval: time.Minute, label: u.Redacted()}
 	if c.Interval != "" {
 		if r.interval, err = time.ParseDuration(c.Interval); err != nil || r.interval < time.Second {
 			return nil, fmt.Errorf("interval %q: want a duration of at least 1s, like 30s", c.Interval)
@@ -372,11 +401,12 @@ func (r *runner) run(ctx context.Context) {
 	defer tick.Stop()
 	for {
 		items, err := r.sc.scrape(ctx)
-		if sendErr := r.sn.send(ctx, items); err == nil {
-			err = sendErr
-		}
 		if ctx.Err() != nil {
-			return
+			return // stopped mid-scrape: a failed scrape here is not the target's fault
+		}
+		// a scrape that finished is shipped even if we are stopping meanwhile
+		if sendErr := r.sn.send(context.WithoutCancel(ctx), items); err == nil {
+			err = sendErr
 		}
 		r.mu.Lock()
 		r.last, r.lastErr = time.Now(), ""
@@ -404,6 +434,10 @@ type manager struct {
 
 	mu      sync.Mutex
 	runners []*runner
+	version int // bumped by every apply, so a stale page's edits can be refused
+
+	edit sync.Mutex // serialises web UI changes
+	wg   sync.WaitGroup
 }
 
 // apply validates conns and makes them the running set, all or nothing.
@@ -415,13 +449,23 @@ func (m *manager) apply(conns []conn, persist bool) error {
 	for _, r := range m.runners {
 		old[r.conn] = r
 	}
+	first, shared := map[string]string{}, map[string]bool{}
+	for _, c := range conns {
+		if u, err := url.Parse(c.Target); err == nil {
+			if t, ok := first[u.Host]; !ok {
+				first[u.Host] = c.Target
+			} else if t != c.Target {
+				shared[u.Host] = true
+			}
+		}
+	}
 	next := make(map[conn]*runner, len(conns))
 	for i, c := range conns {
 		if next[c] != nil {
 			return fmt.Errorf("connection %d duplicates an earlier one", i+1)
 		}
 		if next[c] = old[c]; next[c] == nil {
-			r, err := c.build()
+			r, err := c.build(shared)
 			if err != nil {
 				return fmt.Errorf("connection %d: %w", i+1, err)
 			}
@@ -444,10 +488,11 @@ func (m *manager) apply(conns []conn, persist bool) error {
 		if r.cancel == nil {
 			var ctx context.Context
 			ctx, r.cancel = context.WithCancel(m.ctx)
-			go r.run(ctx)
+			m.wg.Go(func() { r.run(ctx) })
 		}
 		m.runners = append(m.runners, r)
 	}
+	m.version++
 	return nil
 }
 
@@ -498,6 +543,17 @@ func (m *manager) metrics(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
+// needsPassword reports whether a UI on listen is reachable from other hosts.
+// The UI can read DSNs and make this host fetch URLs: never expose it open.
+func needsPassword(listen string) bool {
+	if listen == "" {
+		return false
+	}
+	host, _, _ := net.SplitHostPort(listen)
+	ip := net.ParseIP(host)
+	return host != "localhost" && (ip == nil || !ip.IsLoopback())
+}
+
 func main() {
 	log.SetFlags(0)
 	path := cmp.Or(os.Getenv("CONFIG"), "firewatch.yaml")
@@ -509,12 +565,8 @@ func main() {
 	if len(conns) == 0 && listen == "" {
 		log.Fatalf("nothing to do: no connections in %s, no SENTRY_DSN + TARGETS, and no LISTEN for the web UI", path)
 	}
-	if listen != "" && password == "" {
-		// the UI can read DSNs and make this host fetch URLs: never expose it open
-		host, _, _ := net.SplitHostPort(listen)
-		if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-			log.Fatal("UI_PASSWORD is required unless LISTEN is a loopback address like 127.0.0.1:8080")
-		}
+	if password == "" && needsPassword(listen) {
+		log.Fatal("UI_PASSWORD is required unless LISTEN is a loopback address like 127.0.0.1:8080")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -542,4 +594,5 @@ func main() {
 		log.Printf("web UI on %s", listen)
 	}
 	<-ctx.Done()
+	m.wg.Wait()
 }

@@ -82,6 +82,7 @@
   {{range .Rows}}
   <form class="watch" method="post" action="/save">
     <input type="hidden" name="i" value="{{.I}}">
+    <input type="hidden" name="v" value="{{$.V}}">
     <div class="head">
       <span class="n">{{.N}}</span>
       <h3>{{.Host}}</h3>
@@ -106,6 +107,7 @@
   {{end}}
   <form class="watch new" method="post" action="/save">
     <input type="hidden" name="i" value="new">
+    <input type="hidden" name="v" value="{{.V}}">
     <h3>Post a new watch</h3>
     <div class="pair">
       <label>Prometheus endpoint <input name="target" type="url" required placeholder="http://host:9100/metrics"></label>
