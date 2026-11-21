@@ -520,6 +520,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	m := &manager{ctx: ctx, path: path}
+	if addr := os.Getenv("METRICS_LISTEN"); addr != "" {
+		// bind before the runners start, so a self-scrape doesn't fail on startup
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /metrics", m.metrics)
+		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go func() { log.Fatal(srv.Serve(ln)) }()
+		log.Printf("prometheus metrics on %s/metrics", addr)
+	}
 	if err := m.apply(conns, false); err != nil {
 		log.Fatal(err)
 	}
@@ -528,13 +540,6 @@ func main() {
 		srv := &http.Server{Addr: listen, Handler: m.handler(password), ReadHeaderTimeout: 10 * time.Second}
 		go func() { log.Fatal(srv.ListenAndServe()) }()
 		log.Printf("web UI on %s", listen)
-	}
-	if addr := os.Getenv("METRICS_LISTEN"); addr != "" {
-		mux := http.NewServeMux()
-		mux.HandleFunc("GET /metrics", m.metrics)
-		srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-		go func() { log.Fatal(srv.ListenAndServe()) }()
-		log.Printf("prometheus metrics on %s/metrics", addr)
 	}
 	<-ctx.Done()
 }
