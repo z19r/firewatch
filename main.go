@@ -213,12 +213,11 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 		key := seriesKey(name, attrs)
 		next[key] = last{v: cur}
 		p, seen := s.prev[key]
-		old := p.v
 		switch {
 		case !seen && !s.primed:
 			return // first scrape of this target: baseline only
-		case seen && cur >= old:
-			cur -= old
+		case seen && cur >= p.v:
+			cur -= p.v
 		} // otherwise the series is new or was reset, so its whole value is new
 		if cur != 0 {
 			emit(name, "counter", unit, cur, attrs)
@@ -568,6 +567,10 @@ func needsPassword(listen string) bool {
 	return host != "localhost" && (ip == nil || !ip.IsLoopback())
 }
 
+func newServer(h http.Handler) *http.Server {
+	return &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
+}
+
 func main() {
 	log.SetFlags(0)
 	path := cmp.Or(os.Getenv("CONFIG"), "firewatch.yaml")
@@ -594,8 +597,7 @@ func main() {
 		}
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /metrics", m.metrics)
-		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
-		go func() { log.Fatal(srv.Serve(ln)) }()
+		go func() { log.Fatal(newServer(mux).Serve(ln)) }()
 		log.Printf("prometheus metrics on %s/metrics", addr)
 	}
 	if err := m.apply(conns, false); err != nil {
@@ -603,7 +605,8 @@ func main() {
 	}
 	log.Printf("watching %d connection(s)", len(conns))
 	if listen != "" {
-		srv := &http.Server{Addr: listen, Handler: m.handler(password), ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
+		srv := newServer(m.handler(password))
+		srv.Addr = listen
 		go func() { log.Fatal(srv.ListenAndServe()) }()
 		log.Printf("web UI on %s", listen)
 	}
