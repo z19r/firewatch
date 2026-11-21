@@ -120,4 +120,5 @@ go test -race ./...
 docker build -t firewatch .
 ```
 
-MIT licensed.
+MIT licensed. The web UI embeds Big Shoulders Display (`display.woff2`), which
+is under the SIL Open Font License 1.1.

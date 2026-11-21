@@ -2,64 +2,120 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark">
 <title>firewatch</title>
 <style>
-  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 78rem; padding: 0 1rem; }
-  h1 { margin: 0; font-size: 1.5rem; }
-  .sub { margin: .2rem 0 1.5rem; opacity: .75; }
-  .scroll { overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { text-align: left; padding: .4rem .5rem .4rem 0; vertical-align: top; }
-  th { font-size: .8rem; font-weight: 600; opacity: .75; border-bottom: 1px solid color-mix(in srgb, currentColor 25%, transparent); }
-  input { font: inherit; width: 100%; min-width: 7rem; box-sizing: border-box; padding: .3rem .45rem; }
-  td.wide input { min-width: 16rem; }
-  td.actions { white-space: nowrap; }
-  button { font: inherit; padding: .3rem .7rem; cursor: pointer; }
-  .status { font-size: .85rem; max-width: 18rem; overflow-wrap: anywhere; }
-  .bad, .err { color: #c0392b; }
-  .err { border: 1px solid; border-radius: 4px; padding: .5rem .75rem; }
-  tr.new td { padding-top: 1rem; }
+  @font-face { font-family: "Big Shoulders Display"; src: url(/display.woff2) format("woff2"); font-weight: 700 900; font-display: swap; }
+  :root {
+    --ground: #0E1512; --pit: #0A100D; --card: #131C18; --line: #24332C; --edge: #2F4138;
+    --paper: #E9E4D4; --soft: #C9CFC4; --muted: #9DAA9F; --ember: #FF8A3D;
+    --display: "Big Shoulders Display", "Arial Narrow", Impact, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  body { margin: 0; background: var(--ground); color: var(--paper); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h1, h2, h3 { margin: 0; font-family: var(--display); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  header { position: relative; height: 260px; background: #22342E; overflow: hidden; }
+  header svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .wrap { position: relative; max-width: 1120px; margin: 0 auto; padding: 0 24px; box-sizing: border-box; }
+  header .wrap { padding-top: 40px; }
+  h1 { font-size: clamp(52px, 12vw, 76px); font-weight: 900; line-height: .9; }
+  header p { margin: 12px 0 0; max-width: 15rem; }
+  main { display: flex; flex-direction: column; gap: 20px; padding-top: 32px; padding-bottom: 56px; }
+  .top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+  h2 { font-size: 36px; }
+  .top p { margin: 0; font-size: 14px; color: var(--muted); }
+  code { font: 13px var(--mono); color: var(--soft); }
+  .watch { display: flex; flex-direction: column; gap: 20px; padding: 24px; background: var(--card); border: 1px solid var(--line); border-radius: 6px; }
+  .watch.new { background: none; border: 1px dashed #3F564B; }
+  .watch.new h3 { font-size: 28px; letter-spacing: .04em; text-transform: uppercase; }
+  .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+  .head .n { font: 700 32px var(--display); color: #7C9085; }
+  h3 { font-size: 32px; letter-spacing: .02em; text-transform: none; overflow-wrap: anywhere; }
+  .status { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 14px; color: var(--muted); }
+  .status b { font-size: 13px; letter-spacing: .12em; }
+  .status i { width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; }
+  .sight b { color: var(--ember); }
+  .sight i { background: var(--ember); box-shadow: 0 0 0 4px rgb(255 138 61 / .2); }
+  .lost { color: var(--paper); overflow-wrap: anywhere; }
+  .lost b { color: var(--ground); background: var(--paper); padding: 2px 8px; border-radius: 2px; }
+  .lost i, .start i { border: 2px solid currentColor; }
+  .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr)); gap: 16px; }
+  .rest { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 16px; }
+  label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .rest label { flex: 1 1 260px; }
+  .rest label.short { flex: 0 1 140px; }
+  input { width: 100%; box-sizing: border-box; height: 44px; padding: 0 12px; background: var(--pit); border: 1px solid var(--edge); border-radius: 4px; color: var(--paper); font: 14px var(--mono); }
+  input::placeholder { color: #7C9085; }
+  .buttons { display: flex; gap: 8px; }
+  button { height: 44px; padding: 0 18px; border-radius: 4px; font: 600 14px system-ui, sans-serif; cursor: pointer; background: var(--paper); color: var(--ground); border: 1px solid var(--paper); }
+  button.quiet { background: none; color: var(--soft); border-color: var(--edge); }
+  button:hover { background: #fff; }
+  button.quiet:hover { background: none; color: var(--paper); border-color: var(--muted); }
+  :focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
+  .err { margin: 0; padding: 12px 16px; border: 1px solid var(--paper); border-radius: 4px; overflow-wrap: anywhere; }
 </style>
-<h1>firewatch</h1>
-<p class="sub">Prometheus → Sentry connections, saved to <code>{{.Path}}</code>. Reload to refresh status.</p>
-{{with .Err}}<p class="err" role="alert">Not saved: {{.}}</p>{{end}}
-<div class="scroll">
-<table>
-  <thead>
-    <tr><th>Prometheus endpoint</th><th>Sentry DSN</th><th>Interval</th><th>Metric filter (regex)</th><th>Status</th><th>Actions</th></tr>
-  </thead>
-  <tbody>
+<header>
+  <svg aria-hidden="true" viewBox="0 0 1280 260" preserveAspectRatio="xMaxYMax slice">
+    <g fill="#E9E4D4"><circle cx="150" cy="40" r="1.2" opacity=".6"/><circle cx="420" cy="26" r="1" opacity=".5"/><circle cx="610" cy="58" r="1.2" opacity=".5"/><circle cx="880" cy="34" r="1" opacity=".6"/><circle cx="1190" cy="52" r="1.2" opacity=".5"/></g>
+    <path d="M692 100C686 86 700 76 693 60C688 48 702 40 708 26" fill="none" stroke="#9DAA9F" stroke-width="2" stroke-linecap="round" opacity=".55"/>
+    <path d="M0 150L120 128L260 146L400 112L520 138L680 104L760 118L900 96L1040 130L1180 108L1280 126V260H0Z" fill="#1B2A25"/>
+    <circle cx="690" cy="105" r="9" fill="#FF8A3D" opacity=".25"/><circle cx="690" cy="105" r="4" fill="#FF8A3D"/>
+    <path d="M0 190L160 168L300 186L470 150L640 182L820 156L980 188L1130 160L1280 180V260H0Z" fill="#152019"/>
+    <g transform="translate(130 0)">
+    <path d="M1062 130L1050 196M1086 130L1098 196M1058 152H1090M1054 174H1094M1060 132L1090 152M1088 132L1058 152M1058 152L1094 174M1090 152L1054 174M1042 130H1106" fill="none" stroke="#0A100D" stroke-width="3" stroke-linecap="round"/>
+    <path d="M1050 104H1098V130H1050ZM1040 106L1074 84L1108 106Z" fill="#0A100D"/>
+    <path d="M1057 111H1091V123H1057Z" fill="#F2E9C9"/><path d="M1074 111V123" stroke="#0A100D" stroke-width="2"/>
+    </g>
+    <path d="M0 236L200 222L420 240L640 226L860 216L1060 206L1160 194L1240 192L1280 198V260H0Z" fill="#0E1512"/>
+  </svg>
+  <div class="wrap">
+    <h1>Firewatch</h1>
+    <p>Prometheus brought the fire. Sentry keeps watch.</p>
+  </div>
+</header>
+<main class="wrap">
+  <div class="top">
+    <h2>On watch</h2>
+    <p>Changes apply at once and are saved to <code>{{.Path}}</code>. Reload to refresh status.</p>
+  </div>
+  {{with .Err}}<p class="err" role="alert"><strong>Not saved.</strong> {{.}}</p>{{end}}
   {{range .Rows}}
-    <tr>
-      <td class="wide"><input form="f{{.I}}" name="target" type="url" required value="{{.Target}}" aria-label="Prometheus endpoint"></td>
-      <td class="wide"><input form="f{{.I}}" name="dsn" type="url" required value="{{.DSN}}" aria-label="Sentry DSN"></td>
-      <td><input form="f{{.I}}" name="interval" value="{{.Interval}}" placeholder="1m" aria-label="Interval"></td>
-      <td><input form="f{{.I}}" name="filter" value="{{.Filter}}" placeholder="all metrics" aria-label="Metric filter"></td>
-      <td class="status{{if .Failed}} bad{{end}}">{{.Status}}</td>
-      <td class="actions">
-        <form id="f{{.I}}" method="post" action="/save">
-          <input type="hidden" name="i" value="{{.I}}">
-          <button>Save</button>
-          <button formaction="/delete" formnovalidate>Delete</button>
-        </form>
-      </td>
-    </tr>
+  <form class="watch" method="post" action="/save">
+    <input type="hidden" name="i" value="{{.I}}">
+    <div class="head">
+      <span class="n">{{.N}}</span>
+      <h3>{{.Host}}</h3>
+      <div class="status {{.State}}"><i></i>
+        {{if eq .State "sight"}}<b>IN SIGHT</b>{{else if eq .State "lost"}}<b>LOST SIGHT</b>{{else}}<b>TAKING A BEARING</b>{{end}}
+        <span>{{.Detail}}</span>
+      </div>
+    </div>
+    <div class="pair">
+      <label>Prometheus endpoint <input name="target" type="url" required value="{{.Target}}"></label>
+      <label>Sentry DSN <input name="dsn" type="url" required value="{{.DSN}}"></label>
+    </div>
+    <div class="rest">
+      <label class="short">Interval <input name="interval" value="{{.Interval}}" placeholder="1m"></label>
+      <label>Metric filter (regex) <input name="filter" value="{{.Filter}}" placeholder="all metrics"></label>
+      <div class="buttons">
+        <button>Save</button>
+        <button class="quiet" formaction="/delete" formnovalidate>Remove</button>
+      </div>
+    </div>
+  </form>
   {{end}}
-    <tr class="new">
-      <td class="wide"><input form="fnew" name="target" type="url" required placeholder="http://host:9100/metrics" aria-label="New Prometheus endpoint"></td>
-      <td class="wide"><input form="fnew" name="dsn" type="url" required placeholder="https://key@o0.ingest.sentry.io/0" aria-label="New Sentry DSN"></td>
-      <td><input form="fnew" name="interval" placeholder="1m" aria-label="New interval"></td>
-      <td><input form="fnew" name="filter" placeholder="all metrics" aria-label="New metric filter"></td>
-      <td></td>
-      <td class="actions">
-        <form id="fnew" method="post" action="/save">
-          <input type="hidden" name="i" value="new">
-          <button>Add</button>
-        </form>
-      </td>
-    </tr>
-  </tbody>
-</table>
-</div>
+  <form class="watch new" method="post" action="/save">
+    <input type="hidden" name="i" value="new">
+    <h3>Post a new watch</h3>
+    <div class="pair">
+      <label>Prometheus endpoint <input name="target" type="url" required placeholder="http://host:9100/metrics"></label>
+      <label>Sentry DSN <input name="dsn" type="url" required placeholder="https://key@o0.ingest.sentry.io/0"></label>
+    </div>
+    <div class="rest">
+      <label class="short">Interval <input name="interval" placeholder="1m"></label>
+      <label>Metric filter (regex) <input name="filter" placeholder="all metrics"></label>
+      <div class="buttons"><button>Start watching</button></div>
+    </div>
+  </form>
+</main>
 </html>
