@@ -1,0 +1,6 @@
+/firewatch
+# local agent tooling
+.claude/
+.rtk/
+CLAUDE.md
+STACK-SETUP.md
