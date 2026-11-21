@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -22,7 +23,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,16 +83,24 @@ func newSentry(dsn string) (*sentry, error) {
 
 const batchSize = 1000
 
+// send posts items in batches. A rejected batch does not stop the others,
+// except on 429, where every further batch would be rejected too.
 func (s *sentry) send(ctx context.Context, items []item) error {
+	var errs []error
 	for len(items) > 0 {
 		n := min(len(items), batchSize)
 		if err := s.post(ctx, items[:n]); err != nil {
-			return err
+			errs = append(errs, err)
+			if errors.Is(err, errRateLimited) || ctx.Err() != nil {
+				break
+			}
 		}
 		items = items[n:]
 	}
-	return nil
+	return errors.Join(errs...)
 }
+
+var errRateLimited = errors.New("rate limited")
 
 func (s *sentry) post(ctx context.Context, items []item) error {
 	for i := range items {
@@ -121,6 +130,9 @@ func (s *sentry) post(ctx context.Context, items []item) error {
 	defer resp.Body.Close()
 	// shortcut: a failed or rate-limited (429) batch is dropped, not retried;
 	// add a retry queue if gaps during Sentry outages start to matter.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return fmt.Errorf("sentry: %w", errRateLimited)
+	}
 	if resp.StatusCode/100 != 2 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("sentry: %s: %s", resp.Status, bytes.TrimSpace(msg))
@@ -197,10 +209,7 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 		}
 	}
 	with := func(base map[string]attr, k, v string) map[string]attr {
-		m := make(map[string]attr, len(base)+2)
-		for bk, bv := range base {
-			m[bk] = bv
-		}
+		m := maps.Clone(base)
 		m[k] = attr{v, "string"}
 		return m
 	}
@@ -216,7 +225,7 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 				base[l.GetName()] = attr{l.GetValue(), "string"}
 			}
 			// each emitted item needs its own map: send() adds a sequence attribute
-			own := func() map[string]attr { return with(base, "instance", base["instance"].Value.(string)) }
+			own := func() map[string]attr { return maps.Clone(base) }
 
 			switch fam.GetType() {
 			case dto.MetricType_COUNTER:
@@ -249,14 +258,9 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 }
 
 func seriesKey(name string, attrs map[string]attr) string {
-	keys := make([]string, 0, len(attrs))
-	for k := range attrs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
 	var b strings.Builder
 	b.WriteString(name)
-	for _, k := range keys {
+	for _, k := range slices.Sorted(maps.Keys(attrs)) {
 		fmt.Fprintf(&b, "\xff%s\xff%v", k, attrs[k].Value)
 	}
 	return b.String()
@@ -342,7 +346,8 @@ type runner struct {
 	shipped int
 }
 
-func (c conn) build() (*runner, error) {
+// build makes a runner for c; shared holds the hosts used by more than one target.
+func (c conn) build(shared map[string]bool) (*runner, error) {
 	u, err := url.Parse(c.Target)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("target %q is not a URL like http://host:9100/metrics", c.Target)
@@ -351,7 +356,12 @@ func (c conn) build() (*runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dsn: %w", err)
 	}
-	r := &runner{conn: c, sn: sn, sc: &scraper{url: c.Target, instance: u.Host}, interval: time.Minute}
+	// two endpoints on one host:port must not share an instance label
+	instance := u.Host
+	if shared[u.Host] {
+		instance += u.Path
+	}
+	r := &runner{conn: c, sn: sn, sc: &scraper{url: c.Target, instance: instance}, interval: time.Minute}
 	if c.Interval != "" {
 		if r.interval, err = time.ParseDuration(c.Interval); err != nil || r.interval < time.Second {
 			return nil, fmt.Errorf("interval %q: want a duration of at least 1s, like 30s", c.Interval)
@@ -411,13 +421,23 @@ func (m *manager) apply(conns []conn, persist bool) error {
 	for _, r := range m.runners {
 		old[r.conn] = r
 	}
+	first, shared := map[string]string{}, map[string]bool{}
+	for _, c := range conns {
+		if u, err := url.Parse(c.Target); err == nil {
+			if t, ok := first[u.Host]; !ok {
+				first[u.Host] = c.Target
+			} else if t != c.Target {
+				shared[u.Host] = true
+			}
+		}
+	}
 	next := make(map[conn]*runner, len(conns))
 	for i, c := range conns {
 		if next[c] != nil {
 			return fmt.Errorf("connection %d duplicates an earlier one", i+1)
 		}
 		if next[c] = old[c]; next[c] == nil {
-			r, err := c.build()
+			r, err := c.build(shared)
 			if err != nil {
 				return fmt.Errorf("connection %d: %w", i+1, err)
 			}

@@ -95,7 +95,7 @@ Sentry has counters, gauges and distributions. Prometheus series map like this:
 | (synthetic) `up` | gauge, `1` if the scrape worked, `0` if not                                      |
 
 - Labels become attributes. Every metric also gets `instance` (the target's
-  `host:port`).
+  `host:port`, plus the path when two targets share a `host:port`).
 - Names ending in `_seconds` or `_bytes` (optionally `_total`) get the unit
   `second` or `byte`.
 - The first scrape of a target only records a baseline for cumulative series,
@@ -106,8 +106,9 @@ Sentry has counters, gauges and distributions. Prometheus series map like this:
 
 ## Limits
 
-- A batch Sentry rejects (outage, rate limit) is logged and dropped, not
-  retried.
+- A batch Sentry rejects (outage) is logged and dropped, not retried; the
+  other batches of that scrape are still sent. On a rate limit (429) the rest
+  of that scrape is dropped.
 - Targets are scraped with a plain GET: no auth headers, no custom TLS, no
   service discovery.
 - Native histograms and Sentry distributions are not used: an already

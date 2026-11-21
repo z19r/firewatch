@@ -13,11 +13,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
+	"google.golang.org/protobuf/proto"
 )
 
 const exposition = `# TYPE reqs_total counter
 reqs_total{code="200"} %d
-# TYPE cpu_seconds_total counter
+%s# TYPE cpu_seconds_total counter
 cpu_seconds_total 1.5
 # TYPE mem_bytes gauge
 mem_bytes 42
@@ -31,9 +35,9 @@ lat_seconds_count %d
 `
 
 func TestScrapeAndShip(t *testing.T) {
-	reqs := 10
+	reqs, extra := 10, ""
 	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, exposition, reqs, reqs, reqs, reqs)
+		fmt.Fprintf(w, exposition, reqs, extra, reqs, reqs, reqs)
 	}))
 	defer prom.Close()
 
@@ -117,6 +121,12 @@ func TestScrapeAndShip(t *testing.T) {
 	reqs = 2
 	if v := run()["reqs_total"].Value; v != 2 {
 		t.Errorf("after reset reqs_total = %v, want 2", v)
+	}
+
+	// A series first seen after the baseline is new, so its whole value is sent.
+	extra = "reqs_total{code=\"500\"} 4\n"
+	if it := run()["reqs_total"]; it.Value != 4 || it.Attributes["code"].Value != "500" {
+		t.Errorf("new series = %+v, want code=500 value 4", it)
 	}
 
 	// Target down: up=0 is still shipped.
@@ -209,6 +219,9 @@ func TestConfigAndUI(t *testing.T) {
 	if m.runners[0] != kept {
 		t.Error("unchanged connection was restarted, losing its counter baseline")
 	}
+	if host := strings.TrimPrefix(prom.URL, "http://"); m.runners[1].sc.instance != host+"/other" {
+		t.Errorf("second target on %s has instance %q, want it to include the path", host, m.runners[1].sc.instance)
+	}
 
 	if code := post("/delete", url.Values{"i": {"0"}}, nil); code != http.StatusSeeOther {
 		t.Fatalf("delete: %d", code)
@@ -227,5 +240,63 @@ func TestConfigAndUI(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !strings.Contains(string(body), prom.URL+"/other") {
 		t.Errorf("page: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestSummary(t *testing.T) {
+	p := expfmt.NewTextParser(model.UTF8Validation)
+	fams, err := p.TextToMetricFamilies(strings.NewReader(`# TYPE rpc_seconds summary
+rpc_seconds{quantile="0.5"} 0.2
+rpc_seconds_sum 7
+rpc_seconds_count 5
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &scraper{instance: "box:1"}
+	first := s.convert(fams, 0)
+	if len(first) != 1 || first[0].Type != "gauge" || first[0].Value != 0.2 || first[0].Attributes["quantile"].Value != "0.5" {
+		t.Fatalf("first = %+v, want only the quantile gauge", first)
+	}
+	fams["rpc_seconds"].Metric[0].Summary.SampleCount = proto.Uint64(8)
+	got := map[string]float64{}
+	for _, it := range s.convert(fams, 0) {
+		got[it.Name] = it.Value
+	}
+	if got["rpc_seconds_count"] != 3 || got["rpc_seconds"] != 0.2 {
+		t.Errorf("second = %v, want count delta 3 and quantile 0.2", got)
+	}
+	if _, ok := got["rpc_seconds_sum"]; ok {
+		t.Errorf("unchanged _sum was sent: %v", got)
+	}
+}
+
+func TestSendBatches(t *testing.T) {
+	for _, tc := range []struct {
+		status, wantPosts int
+	}{
+		{http.StatusOK, 3},
+		{http.StatusBadRequest, 3},      // a bad batch does not drop the rest
+		{http.StatusTooManyRequests, 1}, // rate limited: stop
+	} {
+		posts := 0
+		fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if posts++; posts == 1 {
+				w.WriteHeader(tc.status)
+			}
+		}))
+		sn, err := newSentry(strings.Replace(fake.URL, "://", "://key@", 1) + "/42")
+		if err != nil {
+			t.Fatal(err)
+		}
+		items := make([]item, 2*batchSize+1)
+		for i := range items {
+			items[i].Attributes = map[string]attr{}
+		}
+		err = sn.send(context.Background(), items)
+		fake.Close()
+		if posts != tc.wantPosts || (err != nil) != (tc.status != http.StatusOK) {
+			t.Errorf("status %d: posts=%d err=%v, want %d posts", tc.status, posts, err, tc.wantPosts)
+		}
 	}
 }
