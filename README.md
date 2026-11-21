@@ -39,7 +39,8 @@ Every target ships to the same Sentry project. Used when there is no YAML file.
 
 ### YAML
 
-`firewatch.yaml` in the working directory, or wherever `CONFIG` points. When
+`firewatch.yaml` in the working directory, or wherever `CONFIG` points (the
+Docker image uses `/data/firewatch.yaml`). When
 the file exists it replaces the environment variables above. Each connection
 pairs one Prometheus endpoint with one Sentry project:
 
@@ -64,15 +65,15 @@ not preserved).
 
 ```sh
 docker run --rm -p 8080:8080 -v firewatch:/data \
-  -e LISTEN=:8080 -e UI_PASSWORD=change-me -e CONFIG=/data/firewatch.yaml \
+  -e LISTEN=:8080 -e UI_PASSWORD=change-me \
   ghcr.io/z19r/firewatch
 ```
 
-| Variable      | Meaning                                                                         |
-| ------------- | ------------------------------------------------------------------------------- |
-| `LISTEN`      | Address for the UI, e.g. `:8080` or `127.0.0.1:8080`. Unset means no UI.         |
-| `UI_PASSWORD` | HTTP basic-auth password (any username). Required unless `LISTEN` is loopback.  |
-| `CONFIG`      | Path of the YAML file. Default `firewatch.yaml`.                                |
+| Variable      | Meaning                                                                                |
+| ------------- | -------------------------------------------------------------------------------------- |
+| `LISTEN`      | Address for the UI, e.g. `:8080` or `127.0.0.1:8080`. Unset means no UI.               |
+| `UI_PASSWORD` | HTTP basic-auth password (any username). Required unless `LISTEN` is loopback.         |
+| `CONFIG`      | Path of the YAML file. Default `firewatch.yaml` (`/data/firewatch.yaml` in the image). |
 
 The UI serves plain HTTP. Put it behind a TLS-terminating proxy if it leaves a
 trusted network: whoever can log in can read the DSNs and make firewatch fetch
@@ -85,13 +86,13 @@ Sentry bills by metric volume, so start with a filter (for example
 
 Sentry has counters, gauges and distributions. Prometheus series map like this:
 
-| Prometheus                     | Sentry                                                                 |
-| ------------------------------ | ---------------------------------------------------------------------- |
-| counter                        | counter, sent as the increase since the previous scrape                |
-| gauge, untyped                 | gauge                                                                  |
-| histogram                      | counters `<name>_count`, `<name>_sum`, `<name>_bucket` (with `le`), as increases |
-| summary                        | counters `<name>_count`, `<name>_sum`; quantiles as gauges with `quantile` |
-| (synthetic) `up`               | gauge, `1` if the scrape worked, `0` if not                            |
+| Prometheus       | Sentry                                                                           |
+| ---------------- | -------------------------------------------------------------------------------- |
+| counter          | counter, sent as the increase since the previous scrape                          |
+| gauge, untyped   | gauge                                                                            |
+| histogram        | counters `<name>_count`, `<name>_sum`, `<name>_bucket` (with `le`), as increases |
+| summary          | counters `<name>_count`, `<name>_sum`; quantiles as gauges with `quantile`       |
+| (synthetic) `up` | gauge, `1` if the scrape worked, `0` if not                                      |
 
 - Labels become attributes. Every metric also gets `instance` (the target's
   `host:port`).
