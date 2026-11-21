@@ -79,6 +79,21 @@ The UI serves plain HTTP. Put it behind a TLS-terminating proxy if it leaves a
 trusted network: whoever can log in can read the DSNs and make firewatch fetch
 any URL it can reach.
 
+### Own metrics (optional)
+
+Set `METRICS_LISTEN` (e.g. `:9091`) to serve firewatch's own health at
+`/metrics` for Prometheus, without auth and separate from the UI. Per
+connection, labelled `connection` (`01`, `02`, ...) and `target` (passwords
+redacted):
+
+- `firewatch_scrapes_total` / `firewatch_scrape_failures_total`: cycles run
+  and cycles where the scrape or the send to Sentry failed
+- `firewatch_metrics_shipped_total`: samples Sentry accepted
+- `firewatch_last_scrape_timestamp_seconds`
+
+plus `firewatch_connections`. Counters restart from zero when a connection is
+edited in the UI.
+
 Sentry bills by metric volume, so start with a filter (for example
 `^(http_|process_)`) and a relaxed interval, then widen.
 

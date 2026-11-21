@@ -13,6 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 )
 
 const exposition = `# TYPE reqs_total counter
@@ -227,5 +230,30 @@ func TestConfigAndUI(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !strings.Contains(string(body), prom.URL+"/other") {
 		t.Errorf("page: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestSelfMetrics(t *testing.T) {
+	r, err := conn{Target: "http://u:secret@h:9100/metrics", DSN: "https://k@h/1"}.build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.scrapes, r.failures, r.shipped = 3, 1, 40
+	m := &manager{runners: []*runner{r}}
+	rec := httptest.NewRecorder()
+	m.metrics(rec, nil)
+	p := expfmt.NewTextParser(model.UTF8Validation)
+	fams, err := p.TextToMetricFamilies(rec.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := fams["firewatch_metrics_shipped_total"].GetMetric()[0]
+	if got.GetCounter().GetValue() != 40 || fams["firewatch_scrape_failures_total"].GetMetric()[0].GetCounter().GetValue() != 1 {
+		t.Errorf("wrong values: %v", fams)
+	}
+	for _, l := range got.GetLabel() {
+		if strings.Contains(l.GetValue(), "secret") {
+			t.Errorf("password leaked in label %s", l)
+		}
 	}
 }
