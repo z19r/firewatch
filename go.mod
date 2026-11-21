@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	github.com/prometheus/client_model v0.6.3
 	github.com/prometheus/common v0.74.0
+	go.yaml.in/yaml/v2 v2.4.5
 )
 
 require (

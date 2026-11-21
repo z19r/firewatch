@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -128,5 +132,100 @@ func TestBadDSN(t *testing.T) {
 		if _, err := newSentry(dsn); err == nil {
 			t.Errorf("newSentry(%q) accepted", dsn)
 		}
+	}
+}
+
+func TestConfigAndUI(t *testing.T) {
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "x 1") }))
+	defer prom.Close()
+	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer sink.Close()
+	dsn := strings.Replace(sink.URL, "://", "://key@", 1) + "/1"
+
+	path := filepath.Join(t.TempDir(), "firewatch.yaml")
+	yml := fmt.Sprintf("connections:\n  - target: %s\n    dsn: %s\n    interval: 30s\n    filter: ^x\n", prom.URL, dsn)
+	if err := os.WriteFile(path, []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conns, err := loadConfig(path)
+	if err != nil || len(conns) != 1 || conns[0] != (conn{prom.URL, dsn, "30s", "^x"}) {
+		t.Fatalf("loadConfig = %+v, %v", conns, err)
+	}
+	os.WriteFile(path, []byte("connections:\n  - targt: x\n"), 0o600)
+	if _, err := loadConfig(path); err == nil {
+		t.Error("typo'd key accepted")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &manager{ctx: ctx, path: path}
+	if err := m.apply(conns, false); err != nil {
+		t.Fatal(err)
+	}
+	kept := m.runners[0]
+	ui := httptest.NewServer(m.handler("hunter2"))
+	defer ui.Close()
+
+	post := func(action string, form url.Values, mutate func(*http.Request)) int {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, ui.URL+action, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.SetBasicAuth("me", "hunter2")
+		if mutate != nil {
+			mutate(req)
+		}
+		resp, err := http.DefaultTransport.RoundTrip(req) // no redirect following
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	add := url.Values{"i": {"new"}, "target": {prom.URL + "/other"}, "dsn": {dsn}}
+
+	if code := post("/save", add, func(r *http.Request) { r.SetBasicAuth("me", "wrong") }); code != http.StatusUnauthorized {
+		t.Errorf("wrong password: %d", code)
+	}
+	if code := post("/save", add, func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") }); code != http.StatusForbidden {
+		t.Errorf("cross-site post: %d", code)
+	}
+	if code := post("/save", url.Values{"i": {"new"}, "target": {"ftp://x"}, "dsn": {dsn}}, nil); code != http.StatusBadRequest {
+		t.Errorf("bad target: %d", code)
+	}
+	if code := post("/save", url.Values{"i": {"new"}, "target": {prom.URL}, "dsn": {dsn}, "interval": {"30s"}, "filter": {"^x"}}, nil); code != http.StatusBadRequest {
+		t.Errorf("duplicate: %d", code)
+	}
+	if len(m.conns()) != 1 {
+		t.Fatalf("rejected posts changed state: %+v", m.conns())
+	}
+
+	if code := post("/save", add, nil); code != http.StatusSeeOther {
+		t.Fatalf("add: %d", code)
+	}
+	saved, err := loadConfig(path)
+	if err != nil || len(saved) != 2 || saved[1].Target != prom.URL+"/other" {
+		t.Fatalf("saved config = %+v, %v", saved, err)
+	}
+	if m.runners[0] != kept {
+		t.Error("unchanged connection was restarted, losing its counter baseline")
+	}
+
+	if code := post("/delete", url.Values{"i": {"0"}}, nil); code != http.StatusSeeOther {
+		t.Fatalf("delete: %d", code)
+	}
+	if got := m.conns(); len(got) != 1 || got[0].Target != prom.URL+"/other" {
+		t.Errorf("after delete: %+v", got)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, ui.URL+"/", nil)
+	req.SetBasicAuth("me", "hunter2")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(body), prom.URL+"/other") {
+		t.Errorf("page: %d %s", resp.StatusCode, body)
 	}
 }

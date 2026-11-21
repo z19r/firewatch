@@ -24,14 +24,61 @@ SENTRY_DSN=... TARGETS=http://localhost:9100/metrics firewatch
 
 ## Configuration
 
-| Variable          | Required | Default | Meaning                                                            |
-| ----------------- | -------- | ------- | ------------------------------------------------------------------ |
-| `SENTRY_DSN`      | yes      |         | DSN of the Sentry project that receives the metrics                |
-| `TARGETS`         | yes      |         | Prometheus endpoint URLs, separated by commas or whitespace        |
-| `SCRAPE_INTERVAL` | no       | `1m`    | Go duration, e.g. `30s`                                            |
-| `METRIC_FILTER`   | no       |         | Regex; only metric families whose name matches are shipped         |
+There are three ways to configure it. Pick one, or mix YAML and the web UI.
 
-Sentry bills by metric volume, so start with a `METRIC_FILTER` (for example
+### Environment only
+
+Every target ships to the same Sentry project. Used when there is no YAML file.
+
+| Variable          | Required | Default | Meaning                                                     |
+| ----------------- | -------- | ------- | ----------------------------------------------------------- |
+| `SENTRY_DSN`      | yes      |         | DSN of the Sentry project that receives the metrics         |
+| `TARGETS`         | yes      |         | Prometheus endpoint URLs, separated by commas or whitespace |
+| `SCRAPE_INTERVAL` | no       | `1m`    | Go duration, e.g. `30s`                                     |
+| `METRIC_FILTER`   | no       |         | Regex; only metric families whose name matches are shipped  |
+
+### YAML
+
+`firewatch.yaml` in the working directory, or wherever `CONFIG` points. When
+the file exists it replaces the environment variables above. Each connection
+pairs one Prometheus endpoint with one Sentry project:
+
+```yaml
+connections:
+  - target: http://node-exporter:9100/metrics
+    dsn: https://<key>@o<org>.ingest.sentry.io/<project>
+    interval: 30s # optional, default 1m
+    filter: ^node_(cpu|memory)_ # optional regex on metric names
+  - target: http://api:8080/metrics
+    dsn: https://<key>@o<org>.ingest.sentry.io/<other-project>
+```
+
+The file is read at startup. It holds DSNs, so keep it private.
+
+### Web UI (optional)
+
+Set `LISTEN` to turn on a small page that lists the connections with their
+last scrape status and lets you add, edit and delete them. Changes take effect
+immediately and are written back to the YAML file (comments in the file are
+not preserved).
+
+```sh
+docker run --rm -p 8080:8080 -v firewatch:/data \
+  -e LISTEN=:8080 -e UI_PASSWORD=change-me -e CONFIG=/data/firewatch.yaml \
+  ghcr.io/z19r/firewatch
+```
+
+| Variable      | Meaning                                                                         |
+| ------------- | ------------------------------------------------------------------------------- |
+| `LISTEN`      | Address for the UI, e.g. `:8080` or `127.0.0.1:8080`. Unset means no UI.         |
+| `UI_PASSWORD` | HTTP basic-auth password (any username). Required unless `LISTEN` is loopback.  |
+| `CONFIG`      | Path of the YAML file. Default `firewatch.yaml`.                                |
+
+The UI serves plain HTTP. Put it behind a TLS-terminating proxy if it leaves a
+trusted network: whoever can log in can read the DSNs and make firewatch fetch
+any URL it can reach.
+
+Sentry bills by metric volume, so start with a filter (for example
 `^(http_|process_)`) and a relaxed interval, then widen.
 
 ## How metrics are mapped

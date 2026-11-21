@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -11,12 +12,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -25,6 +29,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"go.yaml.in/yaml/v2"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
@@ -267,64 +273,220 @@ func unitOf(name string) string {
 	return ""
 }
 
-// ---- wiring ----
+// ---- config ----
+
+// conn is one Prometheus endpoint -> Sentry project connection. All strings,
+// so it round-trips through YAML and HTML forms unchanged and is comparable.
+type conn struct {
+	Target   string `yaml:"target"`
+	DSN      string `yaml:"dsn"`
+	Interval string `yaml:"interval,omitempty"`
+	Filter   string `yaml:"filter,omitempty"`
+}
+
+// loadConfig reads the YAML file; if there is none, the environment is the config.
+func loadConfig(path string) ([]conn, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		var out []conn
+		for _, t := range strings.FieldsFunc(os.Getenv("TARGETS"), func(r rune) bool { return r == ',' || r == ' ' || r == '\n' }) {
+			out = append(out, conn{t, os.Getenv("SENTRY_DSN"), os.Getenv("SCRAPE_INTERVAL"), os.Getenv("METRIC_FILTER")})
+		}
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var cfg struct {
+		Connections []conn `yaml:"connections"`
+	}
+	if err := yaml.UnmarshalStrict(b, &cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return cfg.Connections, nil
+}
+
+func saveConfig(path string, conns []conn) error {
+	b, err := yaml.Marshal(map[string][]conn{"connections": conns})
+	if err != nil {
+		return err
+	}
+	// temp file + rename, so a crash never leaves half a config (0600: it holds DSNs)
+	f, err := os.CreateTemp(filepath.Dir(path), ".firewatch-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+// ---- running connections ----
+
+type runner struct {
+	conn     conn
+	sn       *sentry
+	sc       *scraper
+	interval time.Duration
+	cancel   context.CancelFunc
+
+	mu      sync.Mutex
+	last    time.Time
+	lastErr string
+	shipped int
+}
+
+func (c conn) build() (*runner, error) {
+	u, err := url.Parse(c.Target)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("target %q is not a URL like http://host:9100/metrics", c.Target)
+	}
+	sn, err := newSentry(c.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("dsn: %w", err)
+	}
+	r := &runner{conn: c, sn: sn, sc: &scraper{url: c.Target, instance: u.Host}, interval: time.Minute}
+	if c.Interval != "" {
+		if r.interval, err = time.ParseDuration(c.Interval); err != nil || r.interval < time.Second {
+			return nil, fmt.Errorf("interval %q: want a duration of at least 1s, like 30s", c.Interval)
+		}
+	}
+	if c.Filter != "" {
+		if r.sc.filter, err = regexp.Compile(c.Filter); err != nil {
+			return nil, fmt.Errorf("filter: %w", err)
+		}
+	}
+	return r, nil
+}
+
+func (r *runner) run(ctx context.Context) {
+	tick := time.NewTicker(r.interval)
+	defer tick.Stop()
+	for {
+		items, err := r.sc.scrape(ctx)
+		if sendErr := r.sn.send(ctx, items); err == nil {
+			err = sendErr
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		r.mu.Lock()
+		r.last, r.lastErr = time.Now(), ""
+		if err != nil {
+			r.lastErr = err.Error()
+			log.Printf("%s: %v", r.sc.instance, err)
+		} else {
+			r.shipped += len(items)
+			log.Printf("%s: shipped %d metrics", r.sc.instance, len(items))
+		}
+		r.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+type manager struct {
+	ctx  context.Context
+	path string
+
+	mu      sync.Mutex
+	runners []*runner
+}
+
+// apply validates conns and makes them the running set, all or nothing.
+// Unchanged connections keep running, so they keep their counter baselines.
+func (m *manager) apply(conns []conn, persist bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	old := make(map[conn]*runner, len(m.runners))
+	for _, r := range m.runners {
+		old[r.conn] = r
+	}
+	next := make(map[conn]*runner, len(conns))
+	for i, c := range conns {
+		if next[c] != nil {
+			return fmt.Errorf("connection %d duplicates an earlier one", i+1)
+		}
+		if next[c] = old[c]; next[c] == nil {
+			r, err := c.build()
+			if err != nil {
+				return fmt.Errorf("connection %d: %w", i+1, err)
+			}
+			next[c] = r
+		}
+	}
+	if persist {
+		if err := saveConfig(m.path, conns); err != nil {
+			return fmt.Errorf("saving config: %w", err)
+		}
+	}
+	for c, r := range old {
+		if next[c] == nil {
+			r.cancel()
+		}
+	}
+	m.runners = m.runners[:0:0]
+	for _, c := range conns {
+		r := next[c]
+		if r.cancel == nil {
+			var ctx context.Context
+			ctx, r.cancel = context.WithCancel(m.ctx)
+			go r.run(ctx)
+		}
+		m.runners = append(m.runners, r)
+	}
+	return nil
+}
+
+func (m *manager) conns() []conn {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]conn, len(m.runners))
+	for i, r := range m.runners {
+		out[i] = r.conn
+	}
+	return out
+}
 
 func main() {
 	log.SetFlags(0)
-	dsn, targets := os.Getenv("SENTRY_DSN"), strings.FieldsFunc(os.Getenv("TARGETS"), func(r rune) bool { return r == ',' || r == ' ' || r == '\n' })
-	if dsn == "" || len(targets) == 0 {
-		log.Fatal("SENTRY_DSN and TARGETS (comma-separated Prometheus URLs) are required")
-	}
-	sn, err := newSentry(dsn)
+	path := cmp.Or(os.Getenv("CONFIG"), "firewatch.yaml")
+	conns, err := loadConfig(path)
 	if err != nil {
-		log.Fatalf("SENTRY_DSN: %v", err)
+		log.Fatal(err)
 	}
-	interval := time.Minute
-	if v := os.Getenv("SCRAPE_INTERVAL"); v != "" {
-		if interval, err = time.ParseDuration(v); err != nil || interval <= 0 {
-			log.Fatalf("SCRAPE_INTERVAL: want a duration like 30s, got %q", v)
-		}
+	listen, password := os.Getenv("LISTEN"), os.Getenv("UI_PASSWORD")
+	if len(conns) == 0 && listen == "" {
+		log.Fatalf("nothing to do: no connections in %s, no SENTRY_DSN + TARGETS, and no LISTEN for the web UI", path)
 	}
-	var filter *regexp.Regexp
-	if v := os.Getenv("METRIC_FILTER"); v != "" {
-		if filter, err = regexp.Compile(v); err != nil {
-			log.Fatalf("METRIC_FILTER: %v", err)
+	if listen != "" && password == "" {
+		// the UI can read DSNs and make this host fetch URLs: never expose it open
+		host, _, _ := net.SplitHostPort(listen)
+		if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			log.Fatal("UI_PASSWORD is required unless LISTEN is a loopback address like 127.0.0.1:8080")
 		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	var wg sync.WaitGroup
-	for _, t := range targets {
-		u, err := url.Parse(t)
-		if err != nil || u.Host == "" {
-			log.Fatalf("TARGETS: %q is not a URL like http://host:9100/metrics", t)
-		}
-		s := &scraper{url: t, instance: u.Host, filter: filter}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			tick := time.NewTicker(interval)
-			defer tick.Stop()
-			for {
-				items, err := s.scrape(ctx)
-				if err != nil {
-					log.Printf("%s: %v", s.instance, err)
-				}
-				if err := sn.send(ctx, items); err != nil {
-					log.Printf("%s: %v", s.instance, err)
-				} else {
-					log.Printf("%s: shipped %d metrics", s.instance, len(items))
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-tick.C:
-				}
-			}
-		}()
+	m := &manager{ctx: ctx, path: path}
+	if err := m.apply(conns, false); err != nil {
+		log.Fatal(err)
 	}
-	log.Printf("watching %d target(s) every %s", len(targets), interval)
-	wg.Wait()
+	log.Printf("watching %d connection(s)", len(conns))
+	if listen != "" {
+		srv := &http.Server{Addr: listen, Handler: m.handler(password), ReadHeaderTimeout: 10 * time.Second}
+		go func() { log.Fatal(srv.ListenAndServe()) }()
+		log.Printf("web UI on %s", listen)
+	}
+	<-ctx.Done()
 }

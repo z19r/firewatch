@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>firewatch</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 78rem; padding: 0 1rem; }
+  h1 { margin: 0; font-size: 1.5rem; }
+  .sub { margin: .2rem 0 1.5rem; opacity: .75; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .4rem .5rem .4rem 0; vertical-align: top; }
+  th { font-size: .8rem; font-weight: 600; opacity: .75; border-bottom: 1px solid color-mix(in srgb, currentColor 25%, transparent); }
+  input { font: inherit; width: 100%; min-width: 7rem; box-sizing: border-box; padding: .3rem .45rem; }
+  td.wide input { min-width: 16rem; }
+  td.actions { white-space: nowrap; }
+  button { font: inherit; padding: .3rem .7rem; cursor: pointer; }
+  .status { font-size: .85rem; max-width: 18rem; overflow-wrap: anywhere; }
+  .bad, .err { color: #c0392b; }
+  .err { border: 1px solid; border-radius: 4px; padding: .5rem .75rem; }
+  tr.new td { padding-top: 1rem; }
+</style>
+<h1>firewatch</h1>
+<p class="sub">Prometheus → Sentry connections, saved to <code>{{.Path}}</code>. Reload to refresh status.</p>
+{{with .Err}}<p class="err" role="alert">Not saved: {{.}}</p>{{end}}
+<div class="scroll">
+<table>
+  <thead>
+    <tr><th>Prometheus endpoint</th><th>Sentry DSN</th><th>Interval</th><th>Metric filter (regex)</th><th>Status</th><th>Actions</th></tr>
+  </thead>
+  <tbody>
+  {{range .Rows}}
+    <tr>
+      <td class="wide"><input form="f{{.I}}" name="target" type="url" required value="{{.Target}}" aria-label="Prometheus endpoint"></td>
+      <td class="wide"><input form="f{{.I}}" name="dsn" type="url" required value="{{.DSN}}" aria-label="Sentry DSN"></td>
+      <td><input form="f{{.I}}" name="interval" value="{{.Interval}}" placeholder="1m" aria-label="Interval"></td>
+      <td><input form="f{{.I}}" name="filter" value="{{.Filter}}" placeholder="all metrics" aria-label="Metric filter"></td>
+      <td class="status{{if .Failed}} bad{{end}}">{{.Status}}</td>
+      <td class="actions">
+        <form id="f{{.I}}" method="post" action="/save">
+          <input type="hidden" name="i" value="{{.I}}">
+          <button>Save</button>
+          <button formaction="/delete" formnovalidate>Delete</button>
+        </form>
+      </td>
+    </tr>
+  {{end}}
+    <tr class="new">
+      <td class="wide"><input form="fnew" name="target" type="url" required placeholder="http://host:9100/metrics" aria-label="New Prometheus endpoint"></td>
+      <td class="wide"><input form="fnew" name="dsn" type="url" required placeholder="https://key@o0.ingest.sentry.io/0" aria-label="New Sentry DSN"></td>
+      <td><input form="fnew" name="interval" placeholder="1m" aria-label="New interval"></td>
+      <td><input form="fnew" name="filter" placeholder="all metrics" aria-label="New metric filter"></td>
+      <td></td>
+      <td class="actions">
+        <form id="fnew" method="post" action="/save">
+          <input type="hidden" name="i" value="new">
+          <button>Add</button>
+        </form>
+      </td>
+    </tr>
+  </tbody>
+</table>
+</div>
+</html>
