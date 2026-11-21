@@ -39,10 +39,8 @@ func (m *manager) handler(password string) http.Handler {
 		w.Write(displayFont)
 	})
 	mux.HandleFunc("POST /save", func(w http.ResponseWriter, r *http.Request) {
-		c := conn{}
-		for name, dst := range map[string]*string{"target": &c.Target, "dsn": &c.DSN, "interval": &c.Interval, "filter": &c.Filter} {
-			*dst = strings.TrimSpace(r.FormValue(name))
-		}
+		field := func(name string) string { return strings.TrimSpace(r.FormValue(name)) }
+		c := conn{Target: field("target"), DSN: field("dsn"), Interval: field("interval"), Filter: field("filter")}
 		m.change(w, r, func(conns []conn) ([]conn, error) {
 			if r.FormValue("i") == "new" {
 				return append(conns, c), nil
