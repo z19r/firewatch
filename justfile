@@ -1,4 +1,4 @@
-pi := "dietpi@10.0.1.57"
+host := "root@z19r-networking"
 
 default:
     @just --list
@@ -24,15 +24,15 @@ run: build
 docker:
     docker build -t firewatch .
 
-# Cross-compile for the Pi and restart its systemd service (no scp there: tar over ssh)
+# Cross-compile for z19r-networking (arm64) and restart its systemd service
 deploy:
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o firewatch-arm64 .
-    tar -cz firewatch-arm64 | ssh {{pi}} 'cd /tmp && tar xzm && sudo install -m 0755 firewatch-arm64 /usr/local/bin/firewatch && rm firewatch-arm64 && sudo systemctl restart firewatch && sleep 2 && sudo systemctl is-active firewatch'
+    tar -cz firewatch-arm64 | ssh {{host}} 'cd /tmp && tar xzm && sudo install -m 0755 firewatch-arm64 /usr/local/bin/firewatch && rm firewatch-arm64 && sudo systemctl restart firewatch && sleep 2 && sudo systemctl is-active firewatch'
     rm firewatch-arm64
 
-# Tail the Pi's logs
+# Tail the production logs
 logs:
-    ssh {{pi}} sudo journalctl -u firewatch -f -o cat
+    ssh {{host}} sudo journalctl -u firewatch -f -o cat
 
 clean:
     rm -f firewatch firewatch-arm64
