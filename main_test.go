@@ -75,7 +75,7 @@ func TestScrapeAndShip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := sn.send(context.Background(), items); err != nil {
+		if _, err := sn.send(context.Background(), items); err != nil {
 			t.Fatal(err)
 		}
 		if want := fmt.Sprintf(`"item_count":%d,`, len(got)); !strings.Contains(itemHeader, want) {
@@ -306,11 +306,11 @@ rpc_seconds_count 5
 
 func TestSendBatches(t *testing.T) {
 	for _, tc := range []struct {
-		status, wantPosts int
+		status, wantPosts, wantSent int
 	}{
-		{http.StatusOK, 3},
-		{http.StatusBadRequest, 3},      // a bad batch does not drop the rest
-		{http.StatusTooManyRequests, 1}, // rate limited: stop
+		{http.StatusOK, 3, 2*batchSize + 1},
+		{http.StatusBadRequest, 3, batchSize + 1}, // a bad batch does not drop the rest
+		{http.StatusTooManyRequests, 1, 0},        // rate limited: stop
 	} {
 		posts := 0
 		fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -326,10 +326,10 @@ func TestSendBatches(t *testing.T) {
 		for i := range items {
 			items[i].Attributes = map[string]attr{}
 		}
-		err = sn.send(context.Background(), items)
+		sent, err := sn.send(context.Background(), items)
 		fake.Close()
-		if posts != tc.wantPosts || (err != nil) != (tc.status != http.StatusOK) {
-			t.Errorf("status %d: posts=%d err=%v, want %d posts", tc.status, posts, err, tc.wantPosts)
+		if posts != tc.wantPosts || sent != tc.wantSent || (err != nil) != (tc.status != http.StatusOK) {
+			t.Errorf("status %d: posts=%d sent=%d err=%v, want %d posts, %d sent", tc.status, posts, sent, err, tc.wantPosts, tc.wantSent)
 		}
 	}
 }
@@ -401,5 +401,38 @@ func TestSelfMetrics(t *testing.T) {
 		if strings.Contains(l.GetValue(), "secret") {
 			t.Errorf("password leaked in label %s", l)
 		}
+	}
+}
+
+// Adding a second endpoint on a running host:port must relabel the first one
+// too, or the same config gives different instance labels before and after a restart.
+func TestInstanceRelabel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &manager{ctx: ctx}
+	a := conn{Target: "http://127.0.0.1:1/metrics", DSN: "https://k@127.0.0.1:1/1", Interval: "1h"}
+	b := conn{Target: "http://127.0.0.1:1/other", DSN: a.DSN, Interval: "1h"}
+	if err := m.apply([]conn{a}, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.runners[0].sc.instance; got != "127.0.0.1:1" {
+		t.Fatalf("alone: instance %q", got)
+	}
+	if err := m.apply([]conn{a, b}, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.runners[0].sc.instance; got != "127.0.0.1:1/metrics" {
+		t.Errorf("shared: instance %q, want 127.0.0.1:1/metrics", got)
+	}
+	cancel()
+	m.wg.Wait()
+}
+
+func TestTargetsFromEnv(t *testing.T) {
+	t.Setenv("TARGETS", "http://a:1/metrics,\thttp://b:2/metrics\r\n")
+	t.Setenv("SENTRY_DSN", "https://k@h/1")
+	conns, err := loadConfig(filepath.Join(t.TempDir(), "none.yaml"))
+	if err != nil || len(conns) != 2 || conns[1].Target != "http://b:2/metrics" {
+		t.Fatalf("loadConfig = %q, %v", conns, err)
 	}
 }

@@ -24,8 +24,9 @@ run: build
 docker:
     docker build -t firewatch .
 
-# Cross-compile for z19r-networking (arm64) and restart its systemd service
-deploy:
+# Test, then cross-compile for z19r-networking (arm64) and restart its systemd service
+deploy: lint test
+    @git diff --quiet HEAD || { echo "uncommitted changes: commit before deploying"; exit 1; }
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o firewatch-arm64 .
     tar -cz firewatch-arm64 | ssh {{host}} 'cd /tmp && tar xzm && sudo install -m 0755 firewatch-arm64 /usr/local/bin/firewatch && rm firewatch-arm64 && sudo systemctl restart firewatch && sleep 2 && sudo systemctl is-active firewatch'
     rm firewatch-arm64

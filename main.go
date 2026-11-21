@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"go.yaml.in/yaml/v2"
 
@@ -83,13 +84,17 @@ func newSentry(dsn string) (*sentry, error) {
 
 const batchSize = 1000
 
-// send posts items in batches. A rejected batch does not stop the others,
-// except on 429, where every further batch would be rejected too.
-func (s *sentry) send(ctx context.Context, items []item) error {
+// send posts items in batches and reports how many Sentry accepted. A rejected
+// batch does not stop the others, except on 429, where every further batch
+// would be rejected too.
+func (s *sentry) send(ctx context.Context, items []item) (int, error) {
 	var errs []error
+	sent := 0
 	for len(items) > 0 {
 		n := min(len(items), batchSize)
-		if err := s.post(ctx, items[:n]); err != nil {
+		if err := s.post(ctx, items[:n]); err == nil {
+			sent += n
+		} else {
 			errs = append(errs, err)
 			if errors.Is(err, errRateLimited) || ctx.Err() != nil {
 				break
@@ -97,7 +102,7 @@ func (s *sentry) send(ctx context.Context, items []item) error {
 		}
 		items = items[n:]
 	}
-	return errors.Join(errs...)
+	return sent, errors.Join(errs...)
 }
 
 var errRateLimited = errors.New("rate limited")
@@ -137,6 +142,7 @@ func (s *sentry) post(ctx context.Context, items []item) error {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("sentry: %s: %s", resp.Status, bytes.TrimSpace(msg))
 	}
+	io.Copy(io.Discard, resp.Body) // a drained body lets the connection be reused
 	return nil
 }
 
@@ -234,8 +240,6 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 			for _, l := range m.GetLabel() {
 				base[l.GetName()] = attr{l.GetValue(), "string"}
 			}
-			// each emitted item needs its own map: send() adds a sequence attribute
-			own := func() map[string]attr { return maps.Clone(base) }
 
 			switch fam.GetType() {
 			case dto.MetricType_COUNTER:
@@ -246,16 +250,17 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 				emit(name, "gauge", u, m.GetUntyped().GetValue(), base)
 			case dto.MetricType_HISTOGRAM:
 				h := m.GetHistogram()
-				count(name+"_count", "", float64(h.GetSampleCount()), own())
-				count(name+"_sum", u, h.GetSampleSum(), own())
+				// each emitted item needs its own map: send() adds a sequence attribute
+				count(name+"_count", "", float64(h.GetSampleCount()), maps.Clone(base))
+				count(name+"_sum", u, h.GetSampleSum(), maps.Clone(base))
 				for _, b := range h.GetBucket() {
 					le := strconv.FormatFloat(b.GetUpperBound(), 'g', -1, 64)
 					count(name+"_bucket", "", float64(b.GetCumulativeCount()), with(base, "le", le))
 				}
 			case dto.MetricType_SUMMARY:
 				sm := m.GetSummary()
-				count(name+"_count", "", float64(sm.GetSampleCount()), own())
-				count(name+"_sum", u, sm.GetSampleSum(), own())
+				count(name+"_count", "", float64(sm.GetSampleCount()), maps.Clone(base))
+				count(name+"_sum", u, sm.GetSampleSum(), maps.Clone(base))
 				for _, q := range sm.GetQuantile() {
 					qs := strconv.FormatFloat(q.GetQuantile(), 'g', -1, 64)
 					emit(name, "gauge", u, q.GetValue(), with(base, "quantile", qs))
@@ -308,7 +313,7 @@ func loadConfig(path string) ([]conn, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		var out []conn
-		for _, t := range strings.FieldsFunc(os.Getenv("TARGETS"), func(r rune) bool { return r == ',' || r == ' ' || r == '\n' }) {
+		for _, t := range strings.FieldsFunc(os.Getenv("TARGETS"), func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
 			out = append(out, conn{t, os.Getenv("SENTRY_DSN"), os.Getenv("SCRAPE_INTERVAL"), os.Getenv("METRIC_FILTER")})
 		}
 		return out, nil
@@ -367,6 +372,14 @@ type runner struct {
 	scrapes, failures int
 }
 
+// instanceOf labels a target: two endpoints on one host:port must not share a label.
+func instanceOf(u *url.URL, shared map[string]bool) string {
+	if shared[u.Host] {
+		return u.Host + u.Path
+	}
+	return u.Host
+}
+
 // build makes a runner for c; shared holds the hosts used by more than one target.
 func (c conn) build(shared map[string]bool) (*runner, error) {
 	u, err := url.Parse(c.Target)
@@ -377,12 +390,7 @@ func (c conn) build(shared map[string]bool) (*runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dsn: %w", err)
 	}
-	// two endpoints on one host:port must not share an instance label
-	instance := u.Host
-	if shared[u.Host] {
-		instance += u.Path
-	}
-	r := &runner{conn: c, sn: sn, sc: &scraper{url: c.Target, instance: instance}, interval: time.Minute, label: u.Redacted()}
+	r := &runner{conn: c, sn: sn, sc: &scraper{url: c.Target, instance: instanceOf(u, shared)}, interval: time.Minute, label: u.Redacted()}
 	if c.Interval != "" {
 		if r.interval, err = time.ParseDuration(c.Interval); err != nil || r.interval < time.Second {
 			return nil, fmt.Errorf("interval %q: want a duration of at least 1s, like 30s", c.Interval)
@@ -405,18 +413,19 @@ func (r *runner) run(ctx context.Context) {
 			return // stopped mid-scrape: a failed scrape here is not the target's fault
 		}
 		// a scrape that finished is shipped even if we are stopping meanwhile
-		if sendErr := r.sn.send(context.WithoutCancel(ctx), items); err == nil {
+		sent, sendErr := r.sn.send(context.WithoutCancel(ctx), items)
+		if err == nil {
 			err = sendErr
 		}
 		r.mu.Lock()
 		r.last, r.lastErr = time.Now(), ""
 		r.scrapes++
+		r.shipped += sent
 		if err != nil {
 			r.failures++
 			r.lastErr = err.Error()
 			log.Printf("%s: %v", r.sc.instance, err)
 		} else {
-			r.shipped += len(items)
 			log.Printf("%s: shipped %d metrics", r.sc.instance, len(items))
 		}
 		r.mu.Unlock()
@@ -464,13 +473,18 @@ func (m *manager) apply(conns []conn, persist bool) error {
 		if next[c] != nil {
 			return fmt.Errorf("connection %d duplicates an earlier one", i+1)
 		}
-		if next[c] = old[c]; next[c] == nil {
-			r, err := c.build(shared)
-			if err != nil {
-				return fmt.Errorf("connection %d: %w", i+1, err)
+		// reuse a running connection only if its label is unchanged
+		if r := old[c]; r != nil {
+			if u, _ := url.Parse(c.Target); r.sc.instance == instanceOf(u, shared) {
+				next[c] = r
+				continue
 			}
-			next[c] = r
 		}
+		r, err := c.build(shared)
+		if err != nil {
+			return fmt.Errorf("connection %d: %w", i+1, err)
+		}
+		next[c] = r
 	}
 	if persist {
 		if err := saveConfig(m.path, conns); err != nil {
@@ -478,7 +492,7 @@ func (m *manager) apply(conns []conn, persist bool) error {
 		}
 	}
 	for c, r := range old {
-		if next[c] == nil {
+		if next[c] != r {
 			r.cancel()
 		}
 	}
@@ -580,7 +594,7 @@ func main() {
 		}
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /metrics", m.metrics)
-		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
 		go func() { log.Fatal(srv.Serve(ln)) }()
 		log.Printf("prometheus metrics on %s/metrics", addr)
 	}
@@ -589,7 +603,7 @@ func main() {
 	}
 	log.Printf("watching %d connection(s)", len(conns))
 	if listen != "" {
-		srv := &http.Server{Addr: listen, Handler: m.handler(password), ReadHeaderTimeout: 10 * time.Second}
+		srv := &http.Server{Addr: listen, Handler: m.handler(password), ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
 		go func() { log.Fatal(srv.ListenAndServe()) }()
 		log.Printf("web UI on %s", listen)
 	}
