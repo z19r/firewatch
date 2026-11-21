@@ -61,7 +61,8 @@ The file is read at startup. It holds DSNs, so keep it private.
 Set `LISTEN` to turn on a small page that lists the connections with their
 last scrape status and lets you add, edit and delete them. Changes take effect
 immediately and are written back to the YAML file (comments in the file are
-not preserved).
+not preserved). If the list changed since you loaded the page, an edit is
+refused and the page shows the current list.
 
 ```sh
 docker run --rm -p 8080:8080 -v firewatch:/data \
@@ -100,7 +101,8 @@ Sentry has counters, gauges and distributions. Prometheus series map like this:
   `second` or `byte`.
 - The first scrape of a target only records a baseline for cumulative series,
   so a restart never replays a counter's lifetime total. A counter that goes
-  backwards is treated as reset.
+  backwards is treated as reset. A series missing from up to 5 scrapes in a
+  row is still sent as a delta when it comes back.
 - Counters that did not change are not sent. `NaN` and `±Inf` samples are
   skipped.
 

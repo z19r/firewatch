@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/subtle"
 	_ "embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -26,29 +27,30 @@ func (m *manager) handler(password string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) { m.render(w, nil) })
 	mux.HandleFunc("POST /save", func(w http.ResponseWriter, r *http.Request) {
-		conns := m.conns()
 		c := conn{}
 		for name, dst := range map[string]*string{"target": &c.Target, "dsn": &c.DSN, "interval": &c.Interval, "filter": &c.Filter} {
 			*dst = strings.TrimSpace(r.FormValue(name))
 		}
-		if i, err := strconv.Atoi(r.FormValue("i")); r.FormValue("i") == "new" {
-			conns = append(conns, c)
-		} else if err != nil || i < 0 || i >= len(conns) {
-			http.Error(w, "no such connection", http.StatusBadRequest)
-			return
-		} else {
+		m.change(w, r, func(conns []conn) ([]conn, error) {
+			if r.FormValue("i") == "new" {
+				return append(conns, c), nil
+			}
+			i, err := rowIndex(r, conns)
+			if err != nil {
+				return nil, err
+			}
 			conns[i] = c
-		}
-		m.update(w, r, conns)
+			return conns, nil
+		})
 	})
 	mux.HandleFunc("POST /delete", func(w http.ResponseWriter, r *http.Request) {
-		conns := m.conns()
-		i, err := strconv.Atoi(r.FormValue("i"))
-		if err != nil || i < 0 || i >= len(conns) {
-			http.Error(w, "no such connection", http.StatusBadRequest)
-			return
-		}
-		m.update(w, r, append(conns[:i], conns[i+1:]...))
+		m.change(w, r, func(conns []conn) ([]conn, error) {
+			i, err := rowIndex(r, conns)
+			if err != nil {
+				return nil, err
+			}
+			return append(conns[:i], conns[i+1:]...), nil
+		})
 	})
 
 	// browsers attach basic-auth credentials to cross-site form posts
@@ -66,8 +68,32 @@ func (m *manager) handler(password string) http.Handler {
 	})
 }
 
-func (m *manager) update(w http.ResponseWriter, r *http.Request, conns []conn) {
-	if err := m.apply(conns, true); err != nil {
+func rowIndex(r *http.Request, conns []conn) (int, error) {
+	i, err := strconv.Atoi(r.FormValue("i"))
+	if err != nil || i < 0 || i >= len(conns) {
+		return 0, errors.New("no such connection")
+	}
+	return i, nil
+}
+
+// change applies one edit from the page. Rows are addressed by position, so an
+// edit from a page older than the last change could hit the wrong row: refuse it.
+func (m *manager) change(w http.ResponseWriter, r *http.Request, edit func([]conn) ([]conn, error)) {
+	m.edit.Lock()
+	defer m.edit.Unlock()
+	m.mu.Lock()
+	v := m.version
+	m.mu.Unlock()
+	if r.FormValue("v") != strconv.Itoa(v) {
+		w.WriteHeader(http.StatusConflict)
+		m.render(w, errors.New("the connections changed since that page was loaded; below is the current list, try again"))
+		return
+	}
+	conns, err := edit(m.conns())
+	if err == nil {
+		err = m.apply(conns, true)
+	}
+	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		m.render(w, err)
 		return
@@ -89,6 +115,7 @@ func (m *manager) render(w http.ResponseWriter, problem error) {
 		}
 		r.mu.Unlock()
 	}
+	v := m.version
 	m.mu.Unlock()
-	page.Execute(w, map[string]any{"Rows": rows, "Path": m.path, "Err": problem})
+	page.Execute(w, map[string]any{"Rows": rows, "Path": m.path, "Err": problem, "V": v})
 }

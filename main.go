@@ -145,9 +145,18 @@ func (s *sentry) post(ctx context.Context, items []item) error {
 type scraper struct {
 	url, instance string
 	filter        *regexp.Regexp
-	prev          map[string]float64 // last cumulative value per series
-	primed        bool               // a scrape has succeeded, so prev is a baseline
+	prev          map[string]last // last cumulative value per series
+	primed        bool            // a scrape has succeeded, so prev is a baseline
 }
+
+type last struct {
+	v      float64
+	missed int // scrapes in a row this series was absent
+}
+
+// keepMissing is how many scrapes a vanished series is remembered, so one that
+// comes back is sent as a delta rather than as its lifetime total.
+const keepMissing = 5
 
 func (s *scraper) scrape(ctx context.Context) ([]item, error) {
 	ts := float64(time.Now().UnixMilli()) / 1e3
@@ -186,7 +195,7 @@ func (s *scraper) fetch(ctx context.Context) (map[string]*dto.MetricFamily, erro
 // sent as the delta since the previous scrape.
 func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item {
 	var out []item
-	next := make(map[string]float64)
+	next := make(map[string]last)
 
 	emit := func(name, typ, unit string, v float64, attrs map[string]attr) {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
@@ -196,8 +205,9 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 	}
 	count := func(name, unit string, cur float64, attrs map[string]attr) {
 		key := seriesKey(name, attrs)
-		next[key] = cur
-		old, seen := s.prev[key]
+		next[key] = last{v: cur}
+		p, seen := s.prev[key]
+		old := p.v
 		switch {
 		case !seen && !s.primed:
 			return // first scrape of this target: baseline only
@@ -251,6 +261,11 @@ func (s *scraper) convert(fams map[string]*dto.MetricFamily, ts float64) []item 
 					emit(name, "gauge", u, q.GetValue(), with(base, "quantile", qs))
 				}
 			}
+		}
+	}
+	for k, p := range s.prev {
+		if _, ok := next[k]; !ok && p.missed < keepMissing {
+			next[k] = last{p.v, p.missed + 1}
 		}
 	}
 	s.prev, s.primed = next, true
@@ -325,6 +340,10 @@ func saveConfig(path string, conns []conn) error {
 		f.Close()
 		return err
 	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
 	if err := f.Close(); err != nil {
 		return err
 	}
@@ -380,11 +399,12 @@ func (r *runner) run(ctx context.Context) {
 	defer tick.Stop()
 	for {
 		items, err := r.sc.scrape(ctx)
-		if sendErr := r.sn.send(ctx, items); err == nil {
-			err = sendErr
-		}
 		if ctx.Err() != nil {
-			return
+			return // stopped mid-scrape: a failed scrape here is not the target's fault
+		}
+		// a scrape that finished is shipped even if we are stopping meanwhile
+		if sendErr := r.sn.send(context.WithoutCancel(ctx), items); err == nil {
+			err = sendErr
 		}
 		r.mu.Lock()
 		r.last, r.lastErr = time.Now(), ""
@@ -410,6 +430,10 @@ type manager struct {
 
 	mu      sync.Mutex
 	runners []*runner
+	version int // bumped by every apply, so a stale page's edits can be refused
+
+	edit sync.Mutex // serialises web UI changes
+	wg   sync.WaitGroup
 }
 
 // apply validates conns and makes them the running set, all or nothing.
@@ -460,10 +484,11 @@ func (m *manager) apply(conns []conn, persist bool) error {
 		if r.cancel == nil {
 			var ctx context.Context
 			ctx, r.cancel = context.WithCancel(m.ctx)
-			go r.run(ctx)
+			m.wg.Go(func() { r.run(ctx) })
 		}
 		m.runners = append(m.runners, r)
 	}
+	m.version++
 	return nil
 }
 
@@ -477,6 +502,17 @@ func (m *manager) conns() []conn {
 	return out
 }
 
+// needsPassword reports whether a UI on listen is reachable from other hosts.
+// The UI can read DSNs and make this host fetch URLs: never expose it open.
+func needsPassword(listen string) bool {
+	if listen == "" {
+		return false
+	}
+	host, _, _ := net.SplitHostPort(listen)
+	ip := net.ParseIP(host)
+	return host != "localhost" && (ip == nil || !ip.IsLoopback())
+}
+
 func main() {
 	log.SetFlags(0)
 	path := cmp.Or(os.Getenv("CONFIG"), "firewatch.yaml")
@@ -488,12 +524,8 @@ func main() {
 	if len(conns) == 0 && listen == "" {
 		log.Fatalf("nothing to do: no connections in %s, no SENTRY_DSN + TARGETS, and no LISTEN for the web UI", path)
 	}
-	if listen != "" && password == "" {
-		// the UI can read DSNs and make this host fetch URLs: never expose it open
-		host, _, _ := net.SplitHostPort(listen)
-		if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-			log.Fatal("UI_PASSWORD is required unless LISTEN is a loopback address like 127.0.0.1:8080")
-		}
+	if password == "" && needsPassword(listen) {
+		log.Fatal("UI_PASSWORD is required unless LISTEN is a loopback address like 127.0.0.1:8080")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -509,4 +541,5 @@ func main() {
 		log.Printf("web UI on %s", listen)
 	}
 	<-ctx.Done()
+	m.wg.Wait()
 }

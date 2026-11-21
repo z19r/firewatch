@@ -40,6 +40,7 @@
       <td class="actions">
         <form id="f{{.I}}" method="post" action="/save">
           <input type="hidden" name="i" value="{{.I}}">
+          <input type="hidden" name="v" value="{{$.V}}">
           <button>Save</button>
           <button formaction="/delete" formnovalidate>Delete</button>
         </form>
@@ -55,6 +56,7 @@
       <td class="actions">
         <form id="fnew" method="post" action="/save">
           <input type="hidden" name="i" value="new">
+          <input type="hidden" name="v" value="{{.V}}">
           <button>Add</button>
         </form>
       </td>
