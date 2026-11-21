@@ -380,7 +380,7 @@ func TestShutdownFinishesSend(t *testing.T) {
 }
 
 func TestSelfMetrics(t *testing.T) {
-	r, err := conn{Target: "http://u:secret@h:9100/metrics", DSN: "https://k@h/1"}.build()
+	r, err := conn{Target: "http://u:secret@h:9100/metrics", DSN: "https://k@h/1"}.build(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
