@@ -31,6 +31,10 @@ deploy: lint test
     tar -cz firewatch-arm64 | ssh {{host}} 'cd /tmp && tar xzm && sudo install -m 0755 firewatch-arm64 /usr/local/bin/firewatch && rm firewatch-arm64 && sudo systemctl restart firewatch && sleep 2 && sudo systemctl is-active firewatch'
     rm firewatch-arm64
 
+# Install or update the systemd unit on the host (config and /etc/firewatch.env stay as they are)
+service:
+    ssh {{host}} 'cat > /etc/systemd/system/firewatch.service && rm -rf /etc/systemd/system/firewatch.service.d && systemctl daemon-reload && systemctl enable firewatch' < deploy/firewatch.service
+
 # Tail the production logs
 logs:
     ssh {{host}} sudo journalctl -u firewatch -f -o cat

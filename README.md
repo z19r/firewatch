@@ -131,6 +131,13 @@ Sentry has counters, gauges and distributions. Prometheus series map like this:
 - Native histograms and Sentry distributions are not used: an already
   aggregated histogram cannot be turned back into individual samples.
 
+## Production
+
+`deploy/` holds what runs on the z19r homelab host: the systemd unit, the
+env-file layout and the list of connections. Sentry DSNs and the UI password
+are kept out of the repo; the live config is `/var/lib/firewatch/firewatch.yaml`
+on the host. `just service` installs the unit and `just deploy` ships the code.
+
 ## Develop
 
 ```sh

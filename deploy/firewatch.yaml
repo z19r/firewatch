@@ -1,0 +1,63 @@
+connections:
+  - target: http://10.0.1.57:8081/metrics
+    dsn: <immich DSN>
+    filter: ^immich_(jobs|queues)_|^process_|^immich_machine_learning_repository_check
+  - target: http://10.0.1.57:8082/metrics
+    dsn: <immich DSN>
+    filter: ^immich_(jobs|queues)_|^process_|^immich_machine_learning_repository_check
+  - target: http://192.168.2.1:9100/metrics
+    dsn: <homelab DSN>
+    filter: ^(wifi_|node_([^n]|n[^a]))
+  - target: http://127.0.0.1:9091/metrics
+    dsn: <firewatch DSN>
+  - target: http://z19r-networking:9100/metrics
+    dsn: <homelab DSN>
+    filter: ^node_(load(1|5|15)|cpu_seconds_total|memory_(MemAvailable|MemTotal|SwapFree|SwapTotal)_bytes|filesystem_(avail|size)_bytes|network_(receive|transmit)_(bytes|errs|drop)_total|disk_(read|written)_bytes_total|disk_io_time_seconds_total|boot_time_seconds|hwmon_temp_celsius|thermal_zone_temp|systemd_units)$|^tailscaled_
+  - target: http://serenity:9100/metrics
+    dsn: <homelab DSN>
+    filter: ^node_(load(1|5|15)|cpu_seconds_total|memory_(MemAvailable|MemTotal|SwapFree|SwapTotal)_bytes|filesystem_(avail|size)_bytes|network_(receive|transmit)_(bytes|errs|drop)_total|disk_(read|written)_bytes_total|disk_io_time_seconds_total|boot_time_seconds|hwmon_temp_celsius|thermal_zone_temp|systemd_units)$|^tailscaled_
+  - target: http://never-been-feta:9100/metrics
+    dsn: <homelab DSN>
+    filter: ^node_(load(1|5|15)|cpu_seconds_total|memory_(MemAvailable|MemTotal|SwapFree|SwapTotal)_bytes|filesystem_(avail|size)_bytes|network_(receive|transmit)_(bytes|errs|drop)_total|disk_(read|written)_bytes_total|disk_io_time_seconds_total|boot_time_seconds|hwmon_temp_celsius|thermal_zone_temp|systemd_units)$|^tailscaled_
+  - target: http://tronbro:9100/metrics
+    dsn: <homelab DSN>
+    filter: ^node_(load(1|5|15)|cpu_seconds_total|memory_(MemAvailable|MemTotal|SwapFree|SwapTotal)_bytes|filesystem_(avail|size)_bytes|network_(receive|transmit)_(bytes|errs|drop)_total|disk_(read|written)_bytes_total|disk_io_time_seconds_total|boot_time_seconds|hwmon_temp_celsius|thermal_zone_temp|systemd_units)$|^tailscaled_
+  - target: http://heresay:9100/metrics
+    dsn: <homelab DSN>
+    filter: ^node_(load(1|5|15)|cpu_seconds_total|memory_(MemAvailable|MemTotal|SwapFree|SwapTotal)_bytes|filesystem_(avail|size)_bytes|network_(receive|transmit)_(bytes|errs|drop)_total|disk_(read|written)_bytes_total|disk_io_time_seconds_total|boot_time_seconds|hwmon_temp_celsius|thermal_zone_temp|systemd_units)$|^tailscaled_
+  - target: http://10.0.1.57:9100/metrics
+    dsn: <homelab DSN>
+    filter: ^node_(load(1|5|15)|cpu_seconds_total|memory_(MemAvailable|MemTotal|SwapFree|SwapTotal)_bytes|filesystem_(avail|size)_bytes|network_(receive|transmit)_(bytes|errs|drop)_total|disk_(read|written)_bytes_total|disk_io_time_seconds_total|boot_time_seconds|hwmon_temp_celsius|thermal_zone_temp|systemd_units)$|^tailscaled_
+  - target: http://z19r-networking:9617/metrics
+    dsn: <homelab DSN>
+    filter: ^pihole_(ads_blocked_today|ads_percentage_today|dns_queries_today|queries_cached|queries_forwarded|unique_clients|domains_being_blocked|status|request_rate|forward_destinations_responsetime)$
+  - target: http://z19r-networking:9167/metrics
+    dsn: <homelab DSN>
+    filter: ^unbound_(up|queries_total|cache_hits_total|cache_misses_total|answer_rcodes_total|recursion_time_seconds_(avg|median)|request_list_exceeded_total|memory_caches_bytes|answers_bogus|unwanted_queries_total|prefetches_total)$
+  - target: http://serenity:9594/metrics
+    dsn: <homelab DSN>
+    filter: ^(plays_total|play_seconds_total|transmit_bytes_total|estimated_transmit_bytes_total|library_(duration|storage)_total|host_(cpu|mem)_util|server_info)$
+  - target: http://serenity:9487/metrics
+    dsn: <homelab DSN>
+    filter: ^tautulli_(up|stream_|bandwidth_)
+  - target: http://serenity:9146/metrics
+    dsn: <homelab DSN>
+    filter: ^icecast_(up|listeners|stream_start|server_start)$
+  - target: http://10.0.1.57:9121/metrics
+    dsn: <immich DSN>
+    filter: ^redis_(up|uptime_in_seconds|connected_clients|blocked_clients|memory_(used|max)_bytes|keyspace_(hits|misses)_total|commands_processed_total|evicted_keys_total|rejected_connections_total|db_keys)$
+  - target: http://10.0.1.57:9187/metrics
+    dsn: <immich DSN>
+    filter: ^pg_(up|database_size_bytes|stat_database_(numbackends|xact_commit|xact_rollback|deadlocks|blks_hit|blks_read|conflicts|temp_bytes)|locks_count|stat_activity_(count|max_tx_duration)|settings_max_connections)$
+  - target: http://never-been-feta:9323/metrics
+    dsn: <homelab DSN>
+    filter: ^engine_daemon_(container_states_containers|health_checks_failed_total|health_checks_total|events_total|container_actions_seconds)$
+  - target: http://tronbro:9323/metrics
+    dsn: <homelab DSN>
+    filter: ^engine_daemon_(container_states_containers|health_checks_failed_total|health_checks_total|events_total|container_actions_seconds)$
+  - target: http://never-been-feta:1338/v1/metrics
+    dsn: <homelab DSN>
+    filter: ^process_(resident_memory_bytes|cpu_seconds_total|open_fds)$
+  - target: http://tronbro:1338/v1/metrics
+    dsn: <homelab DSN>
+    filter: ^process_(resident_memory_bytes|cpu_seconds_total|open_fds)$

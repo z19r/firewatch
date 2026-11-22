@@ -1,0 +1,24 @@
+# Production unit on z19r-networking: `just service` installs it.
+[Unit]
+Description=firewatch (Prometheus -> Sentry metrics)
+Documentation=https://github.com/z19r/firewatch
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/firewatch
+Environment=CONFIG=/var/lib/firewatch/firewatch.yaml
+# LISTEN, UI_PASSWORD, METRICS_LISTEN: see firewatch.env.example
+EnvironmentFile=/etc/firewatch.env
+DynamicUser=yes
+StateDirectory=firewatch
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=15
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
