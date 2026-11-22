@@ -5,7 +5,7 @@ connections:
   - target: http://10.0.1.57:8082/metrics
     dsn: <immich DSN>
     filter: ^immich_(jobs|queues)_|^process_|^immich_machine_learning_repository_check
-  - target: http://192.168.2.1:9100/metrics
+  - target: http://openzrk:9100/metrics
     dsn: <homelab DSN>
     filter: ^(wifi_|node_([^n]|n[^a]))
   - target: http://127.0.0.1:9091/metrics
