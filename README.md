@@ -1,5 +1,7 @@
 # firewatch
 
+[![Monitored by Cooper&Wright](https://img.shields.io/badge/monitored%20by-Cooper%26Wright-8a6a3b?style=flat-square)](https://cooperwright.com)
+
 Prometheus brought the fire. Sentry keeps watch.
 
 `firewatch` scrapes Prometheus `/metrics` endpoints and ships the samples to
